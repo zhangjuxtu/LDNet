@@ -1,0 +1,500 @@
+import torch.nn as nn
+import cv2
+import torch
+from copy import deepcopy
+import numpy as np
+from torch.autograd import Variable
+from torch.autograd import Function as F
+import matplotlib.pyplot as plt
+from parameters import Parameters
+import math
+from scipy import interpolate
+
+p = Parameters()
+
+###############################################################
+##
+## visualize
+## 
+###############################################################
+def nms(heat, kernel=3):
+    pad = (kernel - 1) // 2
+    hmax = nn.functional.max_pool2d(heat, (kernel, kernel), stride=1, padding=pad)
+    keep = (hmax == heat).float()
+    return heat * keep
+
+def visualize_lanehm(image, mask):
+    image = image
+    image =  np.rollaxis(image, axis=2, start=0)
+    image =  np.rollaxis(image, axis=2, start=0)*255.0
+    image = image.astype(np.uint8).copy()
+
+    fig = plt.figure()
+    ax=fig.add_subplot(1, 2, 1)
+    ax.imshow(image)
+    ax=fig.add_subplot(1, 2, 2)
+    ax.imshow(mask)
+    plt.show()
+
+def visualize_points(image, x, y):
+    image = image
+    image =  np.rollaxis(image, axis=2, start=0)
+    image =  np.rollaxis(image, axis=2, start=0)*255.0
+    image = image.astype(np.uint8).copy()
+
+    for k in range(len(y)):
+        for i, j in zip(x[k], y[k]):
+            if i > 0:
+                image = cv2.circle(image, (int(i), int(j)), 5, p.color[1], -1)
+
+    cv2.imshow("test2", image)
+    cv2.waitKey(0)  
+
+def draw_points_v1(x, y, image, idx=0, psize = 8):
+    color_index = idx 
+    for i, j in zip(x, y):
+        image = cv2.circle(image, (int(i), int(j)), psize, p.color[color_index], -1)
+    return image
+
+def visualize_points_origin_size(x, y, test_image, ratio_w, ratio_h):
+    color = 0
+    image = deepcopy(test_image)
+    image =  np.rollaxis(image, axis=2, start=0)
+    image =  np.rollaxis(image, axis=2, start=0)*255.0
+    image = image.astype(np.uint8).copy()
+
+    image = cv2.resize(image, (int(p.x_size/ratio_w), int(p.y_size/ratio_h)))
+
+    for i, j in zip(x, y):
+        color += 1
+        for index in range(len(i)):
+            cv2.circle(image, (int(i[index]), int(j[index])), 10, p.color[color], -1)
+    cv2.imshow("test2", image)
+    cv2.waitKey(0)  
+
+    return test_image
+
+def visualize_gt(gt_point, gt_instance, image, p):
+    image =  np.rollaxis(image, axis=2, start=0)
+    image =  np.rollaxis(image, axis=2, start=0)*255.0
+    image = image.astype(np.uint8).copy()
+
+    for y in range(p.grid_y):
+        for x in range(p.grid_x):
+            if gt_point[0][y][x] > 0:
+                xx = int(gt_point[1][y][x]*p.resize_ratio+p.resize_ratio*x)
+                yy = int(gt_point[2][y][x]*p.resize_ratio+p.resize_ratio*y)
+                image = cv2.circle(image, (xx, yy), 10, p.color[1], -1)
+
+    cv2.imshow("image", image)
+    cv2.waitKey(0)
+
+def visualize_gtv1(gt_point, image, meta, p):
+    image =  np.rollaxis(image, axis=2, start=0)
+    image =  np.rollaxis(image, axis=2, start=0)*255.0
+    image = image.astype(np.uint8).copy()
+    gt_image = deepcopy(image)
+    gt_init_image = deepcopy(image)
+
+    for y in range(p.grid_y):
+        for x in range(p.grid_x):
+            if gt_point[0][y][x] > 0:
+                xx = p.resize_ratio*x
+                yy = p.resize_ratio*y
+                image = cv2.circle(image, (xx, yy), 3, p.color[1], -1)
+
+    gt_lanes = meta['gt_lanes'][0]
+    gt_lanes_init = meta['gt_lanes_init'][0]
+
+    for j2, lane in enumerate(gt_lanes):
+        tmp_x = lane[..., 0] * p.resize_ratio
+        tmp_y = lane[..., 1] * p.resize_ratio
+        gt_image = draw_points_v1(tmp_x, tmp_y, gt_image, 1, psize=1) 
+
+    for j2, lane in enumerate(gt_lanes_init):
+        tmp_x = lane[..., 0] * p.resize_ratio
+        tmp_y = lane[..., 1] * p.resize_ratio
+        gt_init_image = draw_points_v1(tmp_x, tmp_y, gt_init_image, 1, psize=1) 
+
+    fig = plt.figure()
+    ax=fig.add_subplot(2, 2, 1)
+    ax.imshow(image)
+    ax=fig.add_subplot(2, 2, 2)
+    ax.imshow(gt_point[0])
+    ax=fig.add_subplot(2, 2, 3)
+    ax.imshow(gt_image)
+    ax=fig.add_subplot(2, 2, 4)
+    ax.imshow(gt_init_image)
+    plt.show()
+
+def visualize_regression(image, gt):
+    image =  np.rollaxis(image, axis=2, start=0)
+    image =  np.rollaxis(image, axis=2, start=0)*255.0
+    image = image.astype(np.uint8).copy()
+
+    for i in gt:
+        for j in range(p.regression_size):#gt
+            y_value = p.y_size - (p.regression_size-j)*(220/p.regression_size)
+            if i[j] >0:
+                x_value = int(i[j]*p.x_size)
+                image = cv2.circle(image, (x_value, y_value), 5, p.color[1], -1)
+    cv2.imshow("image", image)
+    cv2.waitKey(0)   
+
+def draw_points(x, y, image):
+    color_index = 0
+    for i, j in zip(x, y):
+        print(i)
+        print(j)
+        color_index += 1
+        if color_index > 12:
+            color_index = 12
+        for index in range(len(i)):
+            image = cv2.circle(image, (int(i[index]), int(j[index])), 5, p.color[color_index], -1)
+
+    return image
+
+###############################################################
+##
+## calculate
+## 
+###############################################################
+def convert_to_original_size(x, y, ratio_w, ratio_h):
+    # convert results to original size
+    out_x = []
+    out_y = []
+
+    for i, j in zip(x,y):
+        out_x.append((np.array(i)/ratio_w).tolist())
+        out_y.append((np.array(j)/ratio_h).tolist())
+
+    return out_x, out_y
+
+def get_closest_point_along_angle(x, y, point, angle):
+    index = 0
+    for i, j in zip(x, y): 
+        a = get_angle_two_points(point, (i,j))
+        if abs(a-angle) < 0.1:
+            return (i, j), index
+        index += 1
+    return (-1, -1), -1
+
+
+def get_num_along_point(x, y, point1, point2, image=None): # point1 : source
+    x = np.array(x)
+    y = np.array(y)
+
+    x = x[y<point1[1]]
+    y = y[y<point1[1]]
+
+    dis = np.sqrt( (x - point1[0])**2 + (y - point1[1])**2 )
+
+    count = 0
+    shortest = 1000
+    target_angle = get_angle_two_points(point1, point2)
+    for i in range(len(dis)):
+        angle = get_angle_two_points(point1, (x[i], y[i]))
+        diff_angle = abs(angle-target_angle)
+        distance = dis[i] * math.sin( diff_angle*math.pi*2 )
+        if distance <= 12:
+            count += 1
+            if distance < shortest:
+                shortest = distance
+
+    return count, shortest
+
+def get_closest_upper_point(x, y, point, n):
+    x = np.array(x)
+    y = np.array(y)
+
+    x = x[y<point[1]]
+    y = y[y<point[1]]
+
+    dis = (x - point[0])**2 + (y - point[1])**2
+
+    ind = np.argsort(dis, axis=0)
+    x = np.take_along_axis(x, ind, axis=0).tolist()
+    y = np.take_along_axis(y, ind, axis=0).tolist()
+
+    points = []
+    for i, j in zip(x[:n], y[:n]):
+        points.append((i,j))
+
+    return points
+
+def get_angle_two_points(p1, p2):
+    del_x = p2[0] - p1[0]
+    del_y = p2[1] - p1[1] + 0.000001    
+    if p2[0] >= p1[0] and p2[1] > p1[1]:
+        theta = math.atan(float(del_x/del_y))*180/math.pi
+        theta /= 360.0
+    elif  p2[0] > p1[0] and p2[1] <= p1[1]:
+        theta = math.atan(float(del_x/del_y))*180/math.pi
+        theta += 180
+        theta /= 360.0
+    elif  p2[0] <= p1[0] and p2[1] < p1[1]:
+        theta = math.atan(float(del_x/del_y))*180/math.pi
+        theta += 180
+        theta /= 360.0
+    elif  p2[0] < p1[0] and p2[1] >= p1[1]:
+        theta = math.atan(float(del_x/del_y))*180/math.pi
+        theta += 360
+        theta /= 360.0
+    
+    return theta
+
+def get_angle_on_lane(x, y):
+    sorted_x = None
+    sorted_y = None
+    angle = []
+
+    # sort
+    ind = np.argsort(y, axis=0)
+    sorted_x = np.take_along_axis(x, ind[::-1], axis=0)
+    sorted_y = np.take_along_axis(y, ind[::-1], axis=0)
+
+    # calculate angle
+    length = len(x)
+    theta = -2
+    for i in range(length-1):
+        if sorted_x[i] < 0 :
+            angle.append(-2)
+        else:
+            p1 = (sorted_x[i], sorted_y[i])
+            for index, j in enumerate(sorted_x[i+1:]):
+                if j > 0:
+                    p2 = (sorted_x[i+1+index], sorted_y[i+1+index])
+                    break
+                else:
+                    p2 = (-2, -2)
+            if p2[0] < 0:
+                angle.append(theta)
+                continue
+            theta = get_angle_two_points(p1, p2)
+            angle.append(theta)
+    angle.append(theta)
+
+    return angle
+
+def sort_along_y(x, y):
+    out_x = []
+    out_y = []
+
+    for i, j in zip(x, y):
+        i = np.array(i)
+        j = np.array(j)
+
+        ind = np.argsort(j, axis=0)
+        out_x.append(np.take_along_axis(i, ind[::-1], axis=0).tolist())
+        out_y.append(np.take_along_axis(j, ind[::-1], axis=0).tolist())
+    
+    return out_x, out_y
+
+def sort_along_x(x, y):
+    out_x = []
+    out_y = []
+
+    for i, j in zip(x, y):
+        i = np.array(i)
+        j = np.array(j)
+
+        ind = np.argsort(i, axis=0)
+        out_x.append(np.take_along_axis(i, ind[::-1], axis=0).tolist())
+        out_y.append(np.take_along_axis(j, ind[::-1], axis=0).tolist())
+    
+    return out_x, out_y
+
+def sort_batch_along_y(target_lanes, target_h):
+    out_x = []
+    out_y = []
+
+    for x_batch, y_batch in zip(target_lanes, target_h):
+        temp_x = []
+        temp_y = []
+        for x, y, in zip(x_batch, y_batch):
+            ind = np.argsort(y, axis=0)
+            sorted_x = np.take_along_axis(x, ind[::-1], axis=0)
+            sorted_y = np.take_along_axis(y, ind[::-1], axis=0)
+            temp_x.append(sorted_x)
+            temp_y.append(sorted_y)
+        out_x.append(temp_x)
+        out_y.append(temp_y)
+    
+    return out_x, out_y
+
+def gaussian2D(shape, sigma=(1, 1), rho=0):
+    if not isinstance(sigma, tuple):
+        sigma = (sigma, sigma)
+    sigma_x, sigma_y = sigma
+
+    m, n = [(ss - 1.) / 2. for ss in shape]
+    y, x = np.ogrid[-m:m+1, -n:n+1]
+
+    energy = (x * x) / (sigma_x * sigma_x) - 2 * rho * x * y / (sigma_x * sigma_y) + (y * y) / (sigma_y * sigma_y)
+    h = np.exp(-energy / (2 * (1 - rho * rho)))
+    h[h < np.finfo(h.dtype).eps * h.max()] = 0
+    return h
+
+def draw_umich_gaussian(heatmap, center, radius, k=1):
+    diameter = 2 * radius + 1
+    gaussian = gaussian2D((diameter, diameter), sigma=diameter / 6)
+
+    x, y = int(center[0]), int(center[1])
+
+    height, width = heatmap.shape[0:2]
+
+    left, right = min(x, radius), min(width - x, radius + 1)
+    top, bottom = min(y, radius), min(height - y, radius + 1)
+
+    masked_heatmap = heatmap[y - top:y + bottom, x - left:x + right]
+    masked_gaussian = gaussian[radius - top:radius + bottom, radius - left:radius + right]
+    if min(masked_gaussian.shape) > 0 and min(masked_heatmap.shape) > 0: # TODO debug
+        np.maximum(masked_heatmap, masked_gaussian * k, out=masked_heatmap)
+    return heatmap
+
+def get_pos_lane(lane, spts, epts, p):
+    ys = np.linspace(spts[1], epts[1], p.points_num)
+    #print('lane shape', lane.shape)
+    #print('lane len:', len(lane))
+    #print('lane :', lane)
+
+    if len(lane) > 3:
+        lane = np.array(sorted(lane, key=lambda x: x[1]))
+        tmp_x = lane[:, 0]
+        tmp_y = lane[:, 1]
+        gt_tck = interpolate.splrep(tmp_y, tmp_x)
+        xs = interpolate.splev(ys, gt_tck)
+    elif len(lane) == 3:
+        pts_num = p.points_num // 2
+        xs1 = np.linspace(lane[0][0], lane[1][0],  pts_num)
+        xs2 = np.linspace(lane[1][0], lane[-1][0], pts_num+1)
+        xs = np.append(xs1, xs2[1:])
+        ys1 = np.linspace(lane[0][1], lane[1][1], pts_num)
+        ys2 = np.linspace(lane[1][1], lane[-1][1], pts_num+1)
+        ys = np.append(ys1, ys2[1:])
+    elif len(lane) == 2:
+        assert spts[0] == lane[0][0]
+        assert spts[1] == lane[0][1]
+        assert epts[0] == lane[-1][0]
+        assert epts[1] == lane[-1][1]
+        xs = np.linspace(spts[0], epts[0], p.points_num)
+    else:
+        raise NotImplementedError()
+    xys = np.stack((xs, ys), axis=1)
+    return xys
+
+def get_init_lane(spts, epts, p):
+    xs = np.linspace(spts[0], epts[0], p.points_num)
+    ys = np.linspace(spts[1], epts[1], p.points_num)
+    xys = np.stack((xs, ys), axis=1)
+    return xys
+
+def make_ground_truth_point(target_lanes, target_h, p):
+    target_lanes, target_h = sort_batch_along_y(target_lanes, target_h)
+
+    batch_size = len(target_lanes)
+    ground = np.zeros((batch_size, 1, p.grid_y, p.grid_x))
+    endpoints = np.zeros([batch_size, 10, 2], dtype=np.float32)
+    gt_lanes = np.zeros([batch_size, 5, p.points_num, 2], dtype=np.float32)
+    gt_lanes_init = np.zeros([batch_size, 5, p.points_num, 2], dtype=np.float32)
+    lane_num = np.zeros([batch_size], dtype=np.int8)
+
+    for batch_index, batch in enumerate(target_lanes):
+        lane_num[batch_index] = len(batch)
+        for lane_index, lane in enumerate(batch):
+            tmp_lane = [[x, y] for (x, y) in zip(lane, target_h[batch_index][lane_index]) if x >= 0]
+            if len(tmp_lane) < 2:
+                lane_num[batch_index] -= 1
+                continue
+            else:
+                tmp_lane = np.array(tmp_lane)*1.0/p.resize_ratio
+                spts = tmp_lane[0]
+                epts = tmp_lane[-1]
+                endpoints[batch_index][lane_index*2] = spts
+                endpoints[batch_index][lane_index*2+1] = epts
+
+                gt_lanes[batch_index][lane_index] = get_pos_lane(tmp_lane, spts, epts, p)
+                gt_lanes_init[batch_index][lane_index] = get_init_lane(spts, epts, p)
+
+                #for point_index, point in enumerate(tmp_lane[:, 0]):
+                for point_index, point in enumerate(gt_lanes[batch_index][lane_index]):
+                    #ptx = point
+                    #pty = tmp_lane[:, 1][point_index]
+                    ptx = point[0]
+                    pty = point[1]
+                    x_index = int(ptx)
+                    print('x_index', x_index)
+                    y_index = int(pty)
+                    ground[batch_index][0][y_index][x_index] = 1.0
+
+    meta = {'lane_num':lane_num, 'endpoints':endpoints, 'gt_lanes':gt_lanes,
+            'gt_lanes_init':gt_lanes_init}
+
+    return ground, meta
+
+def sigmoid(x):
+    y = torch.clamp(x.sigmoid(), min=1e-4, max=1 - 1e-4)
+    return y
+
+def _neg_loss(pred, gt):
+    ''' Modified focal loss. Exactly the same as CornerNet.
+        Runs faster and costs a little bit more memory
+        Arguments:
+            pred (batch x c x h x w)
+            gt_regr (batch x c x h x w)
+    '''
+    pos_inds = gt.eq(1).float()
+    neg_inds = gt.lt(1).float()
+
+    neg_weights = torch.pow(1 - gt, 4)
+
+    loss = 0
+
+    pos_loss = torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds
+    neg_loss = torch.log(1 - pred) * torch.pow(pred, 2) * neg_weights * neg_inds
+
+    num_pos = pos_inds.float().sum()
+    pos_loss = pos_loss.sum()
+    neg_loss = neg_loss.sum()
+
+    if num_pos == 0:
+        loss = loss - neg_loss
+    else:
+        loss = loss - (pos_loss + neg_loss) / num_pos
+    return loss
+
+
+class FocalLoss(nn.Module):
+    '''nn.Module warpper for focal loss'''
+    def __init__(self):
+        super(FocalLoss, self).__init__()
+        self.neg_loss = _neg_loss
+
+    def forward(self, out, target):
+        return self.neg_loss(out, target)
+
+def nms(heat, kernel=3):
+    pad = (kernel - 1) // 2
+    hmax = nn.functional.max_pool2d(heat, (kernel, kernel), stride=1, padding=pad)
+    keep = (hmax == heat).float()
+    return heat * keep
+
+def decode_kp_hm(kp_hm, K=10):
+    batch, cat, height, width = kp_hm.size()
+    kp_hm = nms(kp_hm)
+
+    topk_scores, topk_inds = torch.topk(kp_hm.view(batch, cat, -1), K)
+    topk_inds = topk_inds % (height * width)
+    topk_ys = (topk_inds / width).int().float()
+    topk_xs = (topk_inds % width).int().float()
+
+    #topk_xs = topk_xs.view(batch, -1, K).cpu().data.numpy()
+    #topk_ys = topk_ys.view(batch, -1, K).cpu().data.numpy()
+    #topk_scores = topk_scores.view(batch, -1, K).cpu().data.numpy()
+    topk_xs = topk_xs.view(batch, -1, K)
+    topk_ys = topk_ys.view(batch, -1, K)
+    topk_scores = topk_scores.view(batch, -1, K)
+
+    return topk_xs, topk_ys, topk_scores
+
+
